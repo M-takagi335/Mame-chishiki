@@ -338,6 +338,7 @@
       font-size: 23px;
       line-height: 1.35;
       overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     .close-btn {
@@ -738,7 +739,7 @@
       <div class="topbar-row">
         <div>
           <h1>豆知識タイムライン</h1>
-          <p class="subtitle">Wikipediaから毎回取得。知ると誰かに話したくなる豆知識を流し読み。</p>
+          <p class="subtitle">Random Useless Factsから毎回取得。知ると誰かに話したくなる豆知識を流し読み。</p>
         </div>
         <div class="topbar-actions">
           <button id="searchToggle" class="search-toggle" type="button"
@@ -789,7 +790,7 @@
     <section id="timeline" class="timeline" aria-live="polite"></section>
 
     <div id="loadMoreWrap" class="load-more-wrap">
-      <button id="loadMoreBtn" class="load-more">さらに20件読み込む</button>
+      <button id="loadMoreBtn" class="load-more">さらに1件読み込む</button>
     </div>
   </main>
 
@@ -820,9 +821,7 @@
   </div>
 
   <script>
-    const PAGE_SIZE = 20;
-    const API = "https://ja.wikipedia.org/w/api.php";
-
+    const PAGE_SIZE = 1;
     const timelineEl = document.getElementById("timeline");
     const loadMoreBtn = document.getElementById("loadMoreBtn");
     const loadMoreWrap = document.getElementById("loadMoreWrap");
@@ -846,643 +845,132 @@
     const modalFavBtn = document.getElementById("modalFavBtn");
     const closeModalBtn = document.getElementById("closeModalBtn");
 
-    let items = [];
-    let currentTab = "timeline";
-    let activeItem = null;
-    let currentGenre = "";
-    let loading = false;
-    let searchOffset = 0;
-    const SEEN_HISTORY_KEY = "trivia-seen-history-external-v2";
-    const MAX_SEEN_KEYS = 1400;
-    const MAX_SEEN_ARTICLES = 1200;
-    const MAX_SEEN_FINGERPRINTS = 900;
+    let items = [], currentTab = "timeline", activeItem = null, currentGenre = "", loading = false;
+    const SEEN_KEY = "evidence-trivia-seen-v1";
+    const FAVORITES_KEY = "evidence-trivia-favorites-v1";
+    const MAX_SEEN = 1000;
+    let seen = new Set(loadJson(SEEN_KEY, []));
 
-    function loadSeenHistory() {
-      try {
-        const raw = JSON.parse(localStorage.getItem(SEEN_HISTORY_KEY) || "{}");
-        return {
-          keys: Array.isArray(raw.keys) ? raw.keys.slice(-MAX_SEEN_KEYS) : [],
-          articleIds: Array.isArray(raw.articleIds) ? raw.articleIds.slice(-MAX_SEEN_ARTICLES) : [],
-          fingerprints: Array.isArray(raw.fingerprints) ? raw.fingerprints.slice(-MAX_SEEN_FINGERPRINTS) : [],
-          discoveryRound: Number.isFinite(raw.discoveryRound) ? raw.discoveryRound : 0
-        };
-      } catch {
-        return { keys: [], articleIds: [], fingerprints: [], discoveryRound: 0 };
-      }
-    }
+    function loadJson(key, fallback){ try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; } }
+    function saveSeen(){ try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seen].slice(-MAX_SEEN))); } catch {} }
+    function cleanText(v=""){ return String(v).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(); }
+    function hashString(str){ let h=2166136261; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); } return (h>>>0).toString(36); }
+    function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+    function fmt(n, digits=1){ return Number(n).toLocaleString("ja-JP", {maximumFractionDigits:digits}); }
+    function fetchWithTimeout(url, timeout=9000){ const c=new AbortController(); const t=setTimeout(()=>c.abort(),timeout); return fetch(url,{signal:c.signal}).finally(()=>clearTimeout(t)); }
 
-    function saveSeenHistory() {
-      try {
-        localStorage.setItem(SEEN_HISTORY_KEY, JSON.stringify({
-          keys: Array.from(seenKeys).slice(-MAX_SEEN_KEYS),
-          articleIds: Array.from(seenArticleIds).slice(-MAX_SEEN_ARTICLES),
-          fingerprints: seenFactFingerprints.slice(-MAX_SEEN_FINGERPRINTS),
-          discoveryRound
-        }));
-      } catch (error) {
-        console.warn("表示履歴の保存に失敗しました:", error);
-      }
-    }
-
-    const persistedSeen = loadSeenHistory();
-    let seenKeys = new Set(persistedSeen.keys);
-    let seenArticleIds = new Set(persistedSeen.articleIds);
-    let seenFactFingerprints = [...persistedSeen.fingerprints];
-    let discoveryRound = persistedSeen.discoveryRound;
-
-    function applyTheme(theme) {
-      const safeTheme = theme === "dark" ? "dark" : "light";
-      document.documentElement.dataset.theme = safeTheme;
-      localStorage.setItem("trivia-theme", safeTheme);
-      themeOptions.forEach(option => option.classList.toggle("active", option.dataset.themeOption === safeTheme));
-    }
+    function applyTheme(theme){ const t=theme==="dark"?"dark":"light"; document.documentElement.dataset.theme=t; localStorage.setItem("trivia-theme",t); themeOptions.forEach(o=>o.classList.toggle("active",o.dataset.themeOption===t)); }
     function closeMenu(){ menuPanel.classList.remove("show"); menuPanel.setAttribute("aria-hidden","true"); menuButton.setAttribute("aria-expanded","false"); }
-    menuButton.addEventListener("click", e => { e.stopPropagation(); const open=!menuPanel.classList.contains("show"); menuPanel.classList.toggle("show",open); menuPanel.setAttribute("aria-hidden",String(!open)); menuButton.setAttribute("aria-expanded",String(open)); });
+    menuButton.addEventListener("click",e=>{e.stopPropagation(); const open=!menuPanel.classList.contains("show"); menuPanel.classList.toggle("show",open); menuPanel.setAttribute("aria-hidden",String(!open)); menuButton.setAttribute("aria-expanded",String(open));});
     themeOptions.forEach(o=>o.addEventListener("click",()=>{applyTheme(o.dataset.themeOption);closeMenu();}));
-    document.addEventListener("click",e=>{if(!e.target.closest(".menu-wrap")) closeMenu();});
-    applyTheme(localStorage.getItem("trivia-theme") || "light");
-
-    function setSearchOpen(open){ searchPanel.classList.toggle("open",open); searchPanel.setAttribute("aria-hidden",String(!open)); searchToggle.setAttribute("aria-expanded",String(open)); searchToggle.setAttribute("aria-label",open?"検索を閉じる":"検索を開く"); if(open) requestAnimationFrame(()=>genreInput.focus()); }
+    document.addEventListener("click",e=>{if(!e.target.closest(".menu-wrap"))closeMenu();});
+    applyTheme(localStorage.getItem("trivia-theme")||"light");
+    function setSearchOpen(open){ searchPanel.classList.toggle("open",open); searchPanel.setAttribute("aria-hidden",String(!open)); searchToggle.setAttribute("aria-expanded",String(open)); searchToggle.setAttribute("aria-label",open?"検索を閉じる":"検索を開く"); if(open)requestAnimationFrame(()=>genreInput.focus()); }
     searchToggle.addEventListener("click",()=>setSearchOpen(searchToggle.getAttribute("aria-expanded")!=="true"));
 
-    function getFavorites(){ try{return JSON.parse(localStorage.getItem("trivia-favorites-external-v1")||"[]");}catch{return[];} }
-    function saveFavorites(list){localStorage.setItem("trivia-favorites-external-v1",JSON.stringify(list));}
-    function isFavorite(item){return getFavorites().some(x=>x.id===item.id);}
-    function toggleFavorite(item){ const favs=getFavorites(); const i=favs.findIndex(x=>x.id===item.id); if(i>=0) favs.splice(i,1); else favs.unshift(item); saveFavorites(favs); render(); if(activeItem?.id===item.id) updateModalFavoriteButton(); }
+    function getFavorites(){ return loadJson(FAVORITES_KEY,[]); }
+    function saveFavorites(v){ localStorage.setItem(FAVORITES_KEY,JSON.stringify(v)); }
+    function isFavorite(item){ return getFavorites().some(x=>x.id===item.id); }
+    function toggleFavorite(item){ const f=getFavorites(); const i=f.findIndex(x=>x.id===item.id); if(i>=0)f.splice(i,1); else f.unshift(item); saveFavorites(f); render(); if(activeItem?.id===item.id)updateModalFavoriteButton(); }
 
-    function cleanText(text="") {
-      return text.replace(/\s+/g," ").replace(/\[[0-9]+\]/g,"").trim();
+    const translationCache = loadJson("evidence-trivia-translations-v1", {});
+    async function translateToJa(text=""){
+      const source=cleanText(text).slice(0,480); if(!source)return "";
+      if(translationCache[source])return translationCache[source];
+      try{
+        const r=await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(source)}&langpair=en%7Cja`,7000);
+        if(!r.ok)throw new Error(); const d=await r.json(); const out=cleanText(d?.responseData?.translatedText||"");
+        if(out && out.toLowerCase()!==source.toLowerCase()){ translationCache[source]=out; try{localStorage.setItem("evidence-trivia-translations-v1",JSON.stringify(translationCache));}catch{} return out; }
+      }catch{}
+      return source;
     }
 
-    function splitSentences(text="") {
-      return cleanText(text)
-        .split(/(?<=[。！？])/)
-        .map(s=>s.trim())
-        .filter(s=>s.length>=18 && s.length<=220);
+    function makeItem({id,title,summary,detail,source,sourceName,articleTitle,tags=[]}){
+      return {id,title:cleanText(title),summary:cleanText(summary),detail:cleanText(detail),source,sourceName,articleTitle:cleanText(articleTitle),tags};
     }
 
-    function sentenceScore(sentence, index) {
-      let score = 0;
+    // API Ninjas の API キーをここに直接埋め込む。
+    // 例: const API_NINJAS_KEY = "xxxxxxxxxxxxxxxxxxxxxxxx";
+    const API_NINJAS_KEY = "3hcAepfZs8jt2OtYO13kOwW92LWAurZASu66LxXD";
+    const API_NINJAS_FACTS_URL = "https://api.api-ninjas.com/v1/facts";
 
-      // 「人に話したくなる一文」を優先する。
-      if (/\d|[一二三四五六七八九十百千万億兆]+(?:年|個|本|匹|倍|%|％|km|m|cm|mm|kg|g|秒|分|時間|日|度|種類)/.test(sentence)) score += 3;
-      if (/(世界初|日本初|史上初|初めて|最初|唯一|わずか|たった|実は|意外|珍しい|例外)/.test(sentence)) score += 10;
-      if (/(最大|最小|最古|最長|最短|最速|最多|最高|最低|最も)/.test(sentence)) score += 7;
-      if (/(由来|語源|命名|名付け|名前.*(?:から|に由来)|呼ばれるようになった)/.test(sentence)) score += 7;
-      if (/(できない|しない|存在しない|持たない|逆に|一方で|にもかかわらず|通常とは異な|例外的)/.test(sentence)) score += 5;
-      if (/(発見された|確認された|知られている|記録されている|という特徴|性質を持つ|能力を持つ)/.test(sentence)) score += 3;
-      if (/(約|およそ|最大で|平均|以上|以下|未満|超える)/.test(sentence)) score += 2;
-
-      // 「タコの足は8本」のような、シンプルで覚えやすい数字ファクトは特に強く優遇する。
-      if (/(足|脚|腕|歯|目|眼|羽|翼|花びら|指|心臓|胃|触手|牙|角|羽根|房|節|色|種類|対|卵|骨|爪|鱗|鰭|翅|葉|枝|関節|脳|胃袋|心|耳|鼻|口|舌|尾|毛|殻|層)[はがの]{1,2}[^。、]{0,6}\d+(?:本|枚|匹|個|羽|房|節|色|種類?|対|つ|個体|層|重)(?:ある|あり|である|になる|存在する|持つ|備える)?/.test(sentence)) score += 6;
-
-      // 「へえ、そうなんだ」を強く誘発するインパクト要素はさらに加点する。
-      if (/(ギネス|世界記録|伝説|都市伝説|なんと|驚く|驚異|謎|不思議|禁止されて|タブー|奇跡|異常|矛盾)/.test(sentence)) score += 8;
-      if (/(びっくり|衝撃|仰天|まさか|驚異的|伝説的|ユニーク|奇妙|風変わり|奇抜|信じられない|想像もつかない)/.test(sentence)) score += 8;
-      if (/\d+(?:倍|分の1|パーセント|％|%)/.test(sentence)) score += 4;
-      if (/(誤解され|勘違いされ|実際には|本当は|俗説|しばしば〜と思われがちだが|と思われがちだが)/.test(sentence)) score += 6;
-      if (/(にちなんで|語呂合わせ|なぞらえて|皮肉|冗談|ジョーク)/.test(sentence)) score += 4;
-
-      // 数値の羅列だけで意外性のない「スペック文」は弱くする。
-      if (/^[^。]{0,60}(体長|全長|体重|身長|重さ|高さ|大きさ)[はが][^。]{0,40}(センチ|メートル|キロ|グラム|cm|m|kg|g)[^。]{0,20}。?$/.test(sentence) && !/(最大|最小|最長|最短|世界|日本|唯一|わずか)/.test(sentence)) score -= 4;
-
-      // 普通の辞書的説明・沿革・固有名詞の羅列は弱くする。
-      if (/^[^。]{0,55}(とは|は、|は)[^。]{0,90}(である|をいう|を指す|の一つである)。?$/.test(sentence)) score -= 9;
-      if (/(設立された|開業した|発売された|公開された|所属している|本社を置く|所在地|人口は|面積は)/.test(sentence)) score -= 4;
-      if (/(曖昧さ回避|一覧|カテゴリ|参照|脚注|外部リンク|出典|節を参照)/.test(sentence)) score -= 14;
-      if (/^[「『].+[」』](?:は|とは)/.test(sentence) && sentence.length < 55) score -= 2;
-      if (/(に分類される|に属する|の一種である|と呼ばれる分類群|学名は)/.test(sentence)) score -= 4;
-      if (index === 0) score -= 3;
-      if (sentence.length >= 32 && sentence.length <= 115) score += 3;
-      if (sentence.length > 150) score -= 3;
-      return score;
-    }
-
-    function hashString(str) {
-      let h = 2166136261;
-      for (let i=0;i<str.length;i++) { h ^= str.charCodeAt(i); h = Math.imul(h,16777619); }
-      return (h>>>0).toString(36);
-    }
-
-    function factFingerprint(text = "") {
-      return cleanText(text)
-        .toLowerCase()
-        .replace(/[\s、。！？!?,.「」『』（）()\[\]【】・:：;；]/g, "")
-        .replace(/[0-9０-９]+/g, "#")
-        .replace(/(である|です|ます|だった|という|とされる|ことがある|こともある)/g, "");
-    }
-
-    function ngrams(text, n = 3) {
-      const t = factFingerprint(text);
-      const out = new Set();
-      if (t.length <= n) { if (t) out.add(t); return out; }
-      for (let i = 0; i <= t.length - n; i++) out.add(t.slice(i, i+n));
-      return out;
-    }
-
-    function similarity(a, b) {
-      const A = ngrams(a), B = ngrams(b);
-      if (!A.size || !B.size) return 0;
-      let common = 0;
-      for (const x of A) if (B.has(x)) common++;
-      return common / Math.min(A.size, B.size);
-    }
-
-    function isTooSimilarToSeen(item) {
-      const fp = factFingerprint(item.fact || item.title || item.summary);
-      if (!fp) return true;
-      return seenFactFingerprints.some(prev => similarity(fp, prev) >= 0.68);
-    }
-
-    function articleAnchor(title = "") {
-      return title
-        .replace(/[（(].*?[）)]/g, "")
-        .replace(/一覧|曖昧さ回避/g, "")
-        .trim();
-    }
-
-    function subjectHead(sentence = "") {
-      const m = sentence.match(/^([^、。]{1,22}?)(?:は|が|では|には|も)[、]?/);
-      return m ? m[1].replace(/^(また|なお|さらに|一方|しかし|ただし)/, "").trim() : "";
-    }
-
-    function isCandidateAboutArticle(sentence, articleTitle) {
-      const anchor = articleAnchor(articleTitle);
-      if (!anchor) return true;
-
-      // 記事名が文中にある候補は最優先で許可。
-      if (sentence.includes(anchor)) return true;
-
-      // 「人間は〜」「イヌは〜」のように別の主語が明示されている文は、
-      // その主語が記事名と無関係なら採用しない。
-      const head = subjectHead(sentence);
-      if (head) {
-        const shortAnchor = anchor.replace(/[・\s]/g, "");
-        const shortHead = head.replace(/[・\s]/g, "");
-        if (!shortAnchor.includes(shortHead) && !shortHead.includes(shortAnchor)) return false;
+    async function fetchApiNinjasFact(){
+      if (!API_NINJAS_KEY || API_NINJAS_KEY === "YOUR_API_NINJAS_KEY") {
+        throw new Error("API Ninjas のAPIキーが未設定です。HTML内の API_NINJAS_KEY にキーを設定してください。");
       }
 
-      // 主語省略文は記事本文の流れとして許可。ただし比較対象だけを語る文は除外。
-      if (/^(人間|ヒト|男性|女性|子供|成人|イヌ|犬|ネコ|猫|ウサギ|兎|鳥類|魚類|哺乳類|昆虫|植物)(?:は|が|では|には|も)/.test(sentence)) return false;
-      return true;
-    }
-
-    function neighborFitsArticle(sentence, articleTitle) {
-      if (!sentence) return false;
-      const anchor = articleAnchor(articleTitle);
-      if (anchor && sentence.includes(anchor)) return true;
-      const head = subjectHead(sentence);
-      if (!head) return true;
-      const a = anchor.replace(/[・\s]/g, "");
-      const h = head.replace(/[・\s]/g, "");
-      return !!a && (a.includes(h) || h.includes(a));
-    }
-
-    function contextualSentence(sentences, factIndex, articleTitle) {
-      const fact = sentences[factIndex] || "";
-      const candidates = [
-        sentences[factIndex - 1] || "",
-        sentences[factIndex + 1] || "",
-        sentences[factIndex + 2] || ""
-      ];
-      const safe = candidates.find(s =>
-        s &&
-        s !== fact &&
-        s.length >= 24 &&
-        s.length <= 150 &&
-        neighborFitsArticle(s, articleTitle) &&
-        !/^(これ|それ|あれ|この|その|同じ|前者|後者|一方|また|なお|さらに|しかし|ただし)/.test(s)
-      );
-      return safe || "";
-    }
-
-    function makeExplanation(sentences, factIndex, articleTitle, displayFact) {
-      const fact = displayFact || sentences[factIndex] || "";
-      const context = contextualSentence(sentences, factIndex, articleTitle);
-      const intro = sentences[0] || "";
-      const introSafe = intro && intro !== sentences[factIndex] && intro.length <= 180
-        ? intro
-        : "";
-
-      const parts = [
-        `【豆知識】\n${fact}`,
-        `【何についての話？】\nこれは「${articleTitle}」についての豆知識です。`
-      ];
-
-      if (context) parts.push(`【背景・補足】\n${context}`);
-      else if (introSafe) parts.push(`【背景・補足】\n${introSafe}`);
-      else parts.push(`【背景・補足】\n詳しい背景は出典記事で確認できます。`);
-
-      return parts.join("\n\n");
-    }
-
-    function makeTriviaTitle(articleTitle, fact) {
-      const anchor = articleAnchor(articleTitle) || cleanText(articleTitle) || "この項目";
-      let sentence = normalizeFact(fact);
-
-      // 前後を読まないと意味が通じない書き出しはタイトルにしない。
-      sentence = sentence.replace(/^(また|なお|さらに|そして|一方|しかし|ただし)[、,]?/, "").trim();
-
-      // 「足は〜」「寿命は〜」など、記事の主題が省略された属性文だけ記事名を補う。
-      const attributeHead = sentence.match(/^([^、。]{1,14}?)(は|が)(.+[。！？])$/);
-      if (!sentence.includes(anchor) && attributeHead) {
-        const part = attributeHead[1];
-        if (/^(足|脚|腕|目|眼|歯|心臓|脳|骨|首|舌|体長|全長|体重|寿命|速度|温度|直径|高さ|長さ|幅|名前|名称|語源|由来|色|数|個数|特徴|性質|生息地|分布|自転|公転)/.test(part)) {
-          sentence = `${anchor}の${sentence}`;
-        }
-      }
-      return sentence;
-    }
-
-    function normalizeFact(sentence) {
-      return String(sentence || "")
-        .replace(/^(また|なお|さらに|そして|一方|しかし|ただし)[、,]?/, "")
-        .replace(/^このため[、,]?/, "")
-        .trim();
-    }
-
-    // 数字＋助数詞のコアな事実が出た直後の読点より後ろ（補足説明）を削り、
-    // 「タコの足は8本」のように言い切り型の短いタイトルにする。
-    function trimToCoreFact(text) {
-      const m = text.match(/^(.{4,40}?\d+(?:本|枚|匹|個|羽|房|節|色|種類?|対|つ|人|台|冊|杯|粒|頭|尾|巻|皿|滴|回|倍|個体|層|重)(?:ある|あり|いる|になる|存在する|持つ|備える)?)[、,].+([。！？])$/);
-      if (m) return m[1] + (/[。！？]$/.test(m[1]) ? "" : m[2]);
-      return text;
-    }
-
-    function isSelfContainedFact(sentence, articleTitle, relaxed = false) {
-      const fact = normalizeFact(sentence);
-      if (!fact || !/[。！？]$/.test(fact)) return false;
-      if (/^(これ|それ|あれ|この|その|同じ|前者|後者|以上|以下|ここ|そこ|当時|その後|このため|そのため)/.test(fact)) return false;
-
-      const anchor = articleAnchor(articleTitle);
-      if (!anchor) return false;
-      if (fact.includes(anchor)) return true;
-
-      const head = subjectHead(fact);
-      if (head) {
-        const a = anchor.replace(/[・\s]/g, "");
-        const h = head.replace(/[・\s]/g, "");
-        if (a && (a.includes(h) || h.includes(a))) return true;
-        // 主語が別物だと明示されている文は、緩和時でも採用しない。
-        return false;
-      }
-
-      // 記事名を自然に補える属性文。
-      if (/^(足|脚|腕|目|眼|歯|心臓|脳|骨|首|舌|体長|全長|体重|寿命|速度|温度|直径|高さ|長さ|幅|名前|名称|語源|由来|色|数|個数|特徴|性質|生息地|分布|自転|公転)(?:は|が)/.test(fact)) return true;
-
-      // 20件を埋めるための第2段階。明示された別主語がなく、
-      // 単独で意味が完結している強い事実文なら、記事名を主語として補う。
-      return relaxed && fact.length >= 26 && fact.length <= 105;
-    }
-
-    function makeTriviaTitle(articleTitle, fact, relaxed = false) {
-      const anchor = articleAnchor(articleTitle) || cleanText(articleTitle) || "この項目";
-      let sentence = normalizeFact(fact);
-      sentence = sentence.replace(/^(また|なお|さらに|そして|一方|しかし|ただし)[、,]?/, "").trim();
-
-      const attributeHead = sentence.match(/^([^、。]{1,14}?)(は|が)(.+[。！？])$/);
-      if (!sentence.includes(anchor) && attributeHead) {
-        const part = attributeHead[1];
-        if (/^(足|脚|腕|目|眼|歯|心臓|脳|骨|首|舌|体長|全長|体重|寿命|速度|温度|直径|高さ|長さ|幅|名前|名称|語源|由来|色|数|個数|特徴|性質|生息地|分布|自転|公転)/.test(part)) {
-          return trimToCoreFact(`${anchor}の${sentence}`);
-        }
-      }
-
-      if (sentence.includes(anchor) || subjectHead(sentence)) return trimToCoreFact(sentence);
-      if (relaxed) return trimToCoreFact(`${anchor}は、${sentence}`);
-      return trimToCoreFact(sentence);
-    }
-
-    function pageToTriviaList(page, maxItems=2, options={}) {
-      const relaxed = !!options.relaxed;
-      const minScore = Number.isFinite(options.minScore) ? options.minScore : (relaxed ? 3 : 10);
-      const extract = cleanText(page.extract || "");
-      const sentences = splitSentences(extract);
-      if (sentences.length < 2) return [];
-
-      const ranked = sentences
-        .map((sentence,index)=>({ sentence, index, score: sentenceScore(sentence,index) }))
-        .filter(x=>x.score >= minScore)
-        .filter(x=>x.sentence.length <= (relaxed ? 110 : 96))
-        .filter(x=>isCandidateAboutArticle(x.sentence, page.title))
-        .filter(x=>isSelfContainedFact(x.sentence, page.title, relaxed))
-        .sort((a,b)=>b.score-a.score);
-
-      if (!ranked.length) return [];
-
-      const chosen = [];
-      for (const candidate of ranked) {
-        if (chosen.length >= maxItems) break;
-        const fact = normalizeFact(candidate.sentence);
-        const title = makeTriviaTitle(page.title, fact, relaxed);
-        if (title.length < 6 || title.length > 135) continue;
-        if (chosen.some(x=>Math.abs(x.index-candidate.index)<=1)) continue;
-        chosen.push({...candidate, fact, title});
-      }
-
-      return chosen.map(candidate=>{
-        const context = contextualSentence(sentences, candidate.index, page.title);
-        const summary = context || `この事実は「${page.title}」の記事本文に記載されています。`;
-        return {
-          id: `${page.pageid}-${hashString(candidate.fact)}`,
-          pageid: page.pageid,
-          articleTitle: page.title,
-          title: candidate.title,
-          fact: candidate.fact,
-          summary,
-          detail: makeExplanation(sentences,candidate.index,page.title,candidate.title),
-          source: page.fullurl || `https://ja.wikipedia.org/?curid=${page.pageid}`,
-          sourceName: "Wikipedia",
-          triviaScore: candidate.score
-        };
-      });
-    }
-
-    async function fetchWithTimeout(url, timeoutMs = 9000) {
-      let timer;
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("タイムアウトしました")), timeoutMs);
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 9000);
       try {
-        return await Promise.race([fetch(url), timeout]);
+        const response = await fetch(API_NINJAS_FACTS_URL, {
+          signal: controller.signal,
+          headers: { "X-Api-Key": API_NINJAS_KEY }
+        });
+        if (!response.ok) throw new Error(`API Ninjas Facts API: ${response.status}`);
+        const data = await response.json();
+        const raw = cleanText(Array.isArray(data) ? data[0]?.fact : data?.fact);
+        if (!raw) throw new Error("豆知識を取得できませんでした。");
+
+        const ja = await translateToJa(raw);
+        const factJa = cleanText(ja || raw);
+        return makeItem({
+          id: `ninjas-${hashString(raw)}`,
+          title: factJa,
+          summary: "API Ninjas Facts API から取得した豆知識です。",
+          detail: `${factJa}\n\n原文：${raw}\n\nこのFacts APIは短い事実文を返すAPIなので、ここでは取得した事実と原文を表示しています。`,
+          source: "https://api-ninjas.com/api/facts",
+          sourceName: "API Ninjas Facts",
+          articleTitle: "Facts API",
+          tags: ["豆知識", "Facts"]
+        });
       } finally {
         clearTimeout(timer);
       }
     }
 
-    async function fetchPagesByIds(ids) {
-      if (!ids.length) return [];
-      const params = new URLSearchParams({
-        origin:"*", action:"query", format:"json", pageids:ids.join("|"),
-        prop:"extracts|info", explaintext:"1", inprop:"url", exsectionformat:"plain"
-      });
-      const response = await fetchWithTimeout(`${API}?${params.toString()}`, 9000);
-      if (!response.ok) throw new Error("Wikipedia本文を取得できませんでした。");
-      const data = await response.json();
-      return data?.query?.pages ? Object.values(data.query.pages) : [];
-    }
-
-    async function fetchRandomCandidates(limit=50) {
-      const params = new URLSearchParams({
-        origin:"*", action:"query", format:"json", generator:"random", grnnamespace:"0", grnlimit:String(limit),
-        prop:"extracts|info", explaintext:"1", inprop:"url", exsectionformat:"plain"
-      });
-      const response = await fetchWithTimeout(`${API}?${params.toString()}`, 9000);
-      if (!response.ok) throw new Error("Wikipedia APIに接続できませんでした。");
-      const data = await response.json();
-      return data?.query?.pages ? Object.values(data.query.pages) : [];
-    }
-
-    async function fetchSearchCandidates(query, limit=50, offsetOverride=null) {
-      const offset = offsetOverride === null ? searchOffset : offsetOverride;
-      const searchParams = new URLSearchParams({
-        origin:"*", action:"query", format:"json", list:"search", srsearch:query,
-        srnamespace:"0", srlimit:String(limit), sroffset:String(offset), srprop:"", utf8:"1"
-      });
-      const response = await fetchWithTimeout(`${API}?${searchParams.toString()}`, 9000);
-      if (!response.ok) throw new Error("Wikipedia検索に失敗しました。");
-      const data = await response.json();
-      const results = data?.query?.search || [];
-      if (offsetOverride === null) searchOffset = data?.continue?.sroffset || 0;
-      return fetchPagesByIds(results.map(x=>x.pageid));
-    }
-
-    const TRIVIA_CATEGORIES = [
-      { key:"animals", label:"動物", queries:[
-        '動物 生態 珍しい 意外', '動物 唯一 特殊能力 驚き', 'incategory:"動物" 珍しい'
-      ]},
-      { key:"space", label:"宇宙", queries:[
-        '宇宙 惑星 恒星 謎 不思議', '太陽系 発見 意外 事実', 'incategory:"天文学" 珍しい'
-      ]},
-      { key:"human", label:"人体", queries:[
-        '人体 身体 意外 事実 豆知識', '脳 骨 血液 感覚 不思議', 'incategory:"人体" 珍しい'
-      ]},
-      { key:"food", label:"食べ物", queries:[
-        '食べ物 料理 由来 意外', '果物 野菜 香辛料 誤解 実は', 'incategory:"食品" 由来 珍しい'
-      ]},
-      { key:"history", label:"歴史", queries:[
-        '歴史 世界初 日本初 意外', '古代 中世 近代 意外 逸話', '発祥 起源 歴史 実は'
-      ]},
-      { key:"geography", label:"地理", queries:[
-        '国 都市 島 山 川 珍しい 記録', '世界 最大 最小 国 意外', '自然地理 珍しい 不思議'
-      ]},
-      { key:"science", label:"科学", queries:[
-        '科学 現象 不思議 発見', '物理 化学 珍しい 現象', '元素 物質 意外な性質'
-      ]},
-      { key:"language", label:"言葉", queries:[
-        '言葉 語源 意外 由来 日本語', '名称 命名 語源 面白い', '外来語 語源 誤解'
-      ]},
-      { key:"inventions", label:"発明", queries:[
-        '発明 技術 世界初 偶然', '道具 機械 発明 逸話', '技術史 初めて 意外'
-      ]},
-      { key:"culture", label:"文化", queries:[
-        '文化 習慣 風習 由来 意外', '祭り 伝統 文化 起源 珍しい', '世界 文化 習慣 珍しい タブー'
-      ]},
-      { key:"nature", label:"自然", queries:[
-        '自然 現象 気象 海洋 珍しい', '雷 雲 雪 火山 地震 不思議', '地球 自然現象 謎'
-      ]},
-      { key:"plants", label:"植物", queries:[
-        '植物 花 木 生態 珍しい', '植物 珍しい 性質 不思議', 'incategory:"植物" 珍しい'
-      ]},
-      { key:"art", label:"芸術", queries:[
-        '美術 音楽 建築 由来 逸話', '絵画 楽器 建築 意外な話', '芸術 技法 起源 珍しい'
-      ]},
-      { key:"everyday", label:"身近なもの", queries:[
-        '日用品 身近なもの 由来 意外', '衣服 家具 道具 起源 珍しい', '生活用品 名前 由来 誤解'
-      ]}
-    ];
-
-    function shuffledCategories(round = 0) {
-      const list = [...TRIVIA_CATEGORIES];
-      // 読み込み回ごとに開始ジャンルをずらし、同じ並びに固定しない。
-      const shift = round % list.length;
-      return list.slice(shift).concat(list.slice(0, shift));
-    }
-
-    async function fetchCategoryCandidates(category, round, perQueryLimit=24) {
-      const queryIndex = Math.floor(round / TRIVIA_CATEGORIES.length) % category.queries.length;
-      const query = category.queries[queryIndex];
-      const cycle = Math.floor(round / (TRIVIA_CATEGORIES.length * category.queries.length));
-      const offset = ((cycle * 37 + round * 13 + queryIndex * 11) % 18) * 10;
-      const pages = await fetchSearchCandidates(query, perQueryLimit, offset);
-      return pages.map(page => ({...page, _triviaCategory: category.key, _triviaCategoryLabel: category.label}));
-    }
-
-    function attachCategory(items, page) {
-      return items.map(item => ({
-        ...item,
-        category: page._triviaCategory || "other",
-        categoryLabel: page._triviaCategoryLabel || "その他"
-      }));
-    }
-
-    async function getExternalTrivia(count=PAGE_SIZE) {
-      const collected = [];
-      const usedThisBatch = new Set();
-
-      function acceptItem(page, item, allowSimilar = false) {
-        if (!item) return false;
-        if (seenKeys.has(item.id)) return false;
-        if (!allowSimilar && isTooSimilarToSeen(item)) return false;
-        seenKeys.add(item.id);
-        seenFactFingerprints.push(factFingerprint(item.fact || item.title));
-        if (seenFactFingerprints.length > MAX_SEEN_FINGERPRINTS) seenFactFingerprints.shift();
-        seenArticleIds.add(page.pageid);
-        usedThisBatch.add(page.pageid);
-        collected.push(item);
-        return true;
-      }
-
-      if (currentGenre) {
-        let attempts = 0;
-        while (collected.length < count && attempts < 12) {
-          const pages = await fetchSearchCandidates(currentGenre, 50);
-          if (!pages.length) break;
-          for (const page of pages) {
-            if (collected.length >= count) break;
-            if (!page.title || !page.extract || page.extract.length < 120) continue;
-            if (/(一覧|曖昧さ回避|索引|年表|人物一覧|作品一覧)$/.test(page.title)) continue;
-            if (seenArticleIds.has(page.pageid) || usedThisBatch.has(page.pageid)) continue;
-
-            let candidates = pageToTriviaList(page, 2);
-            if (!candidates.length) candidates = pageToTriviaList(page, 2, {relaxed:true, minScore:5});
-            for (const item of candidates) {
-              if (acceptItem(page, item)) break;
-            }
-          }
-          attempts++;
-        }
-        saveSeenHistory();
-        return collected.slice(0,count);
-      }
-
-      // 第1段階: 質を優先した厳しい条件で集める。
-      let attempts = 0;
-      while (collected.length < count && attempts < 8) {
-        let pages = [];
-        try { pages = await fetchRandomCandidates(50); }
-        catch (error) { console.warn("ランダム記事の取得をスキップ:", error); attempts++; continue; }
-
-        for (let i=pages.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [pages[i],pages[j]]=[pages[j],pages[i]]; }
-        for (const page of pages) {
-          if (collected.length >= count) break;
-          if (!page.title || !page.extract || page.extract.length < 140) continue;
-          if (/(一覧|曖昧さ回避|索引|年表|人物一覧|作品一覧|ディスコグラフィ|作品リスト)$/.test(page.title)) continue;
-          if (seenArticleIds.has(page.pageid) || usedThisBatch.has(page.pageid)) continue;
-          const candidates = pageToTriviaList(page, 2);
-          const viable = candidates.filter(x => !seenKeys.has(x.id) && !isTooSimilarToSeen(x));
-          if (!viable.length) continue;
-          const topPool = viable.slice(0, Math.min(2, viable.length));
-          acceptItem(page, topPool[Math.floor(Math.random()*topPool.length)]);
-        }
+    async function getExternalTrivia(count=1){
+      const out=[];
+      let attempts=0;
+      while(out.length<count && attempts<8){
         attempts++;
-      }
-
-      // 第2段階: 20件に届かないときだけ、意味の完結性を保ったまま条件を緩める。
-      let fillAttempts = 0;
-      while (collected.length < count && fillAttempts < 10) {
-        let pages = [];
-        try { pages = await fetchRandomCandidates(50); }
-        catch (error) { console.warn("補充候補の取得をスキップ:", error); fillAttempts++; continue; }
-
-        for (let i=pages.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [pages[i],pages[j]]=[pages[j],pages[i]]; }
-        for (const page of pages) {
-          if (collected.length >= count) break;
-          if (!page.title || !page.extract || page.extract.length < 110) continue;
-          if (/(一覧|曖昧さ回避|索引|年表|人物一覧|作品一覧|ディスコグラフィ|作品リスト)$/.test(page.title)) continue;
-          if (seenArticleIds.has(page.pageid) || usedThisBatch.has(page.pageid)) continue;
-          const candidates = pageToTriviaList(page, 2, {relaxed:true, minScore:5});
-          const item = candidates.find(x => !seenKeys.has(x.id) && !isTooSimilarToSeen(x));
-          if (item) acceptItem(page, item);
+        try {
+          const item = await fetchApiNinjasFact();
+          if (!item?.id || !item.title) continue;
+          if (seen.has(item.id)) continue;
+          if (currentGenre) {
+            const q=currentGenre.toLowerCase();
+            const hay=`${item.title} ${item.detail}`.toLowerCase();
+            if (!hay.includes(q)) continue;
+          }
+          seen.add(item.id);
+          out.push(item);
+        } catch (error) {
+          if (String(error?.message||"").includes("APIキーが未設定")) throw error;
+          console.warn("API Ninjas取得失敗", error);
         }
-        fillAttempts++;
       }
-
-      // 第3段階: 過去履歴との「似ている」判定だけを外して20件を優先。
-      // 同一記事・同一IDは引き続き禁止する。
-      let finalAttempts = 0;
-      while (collected.length < count && finalAttempts < 5) {
-        let pages = [];
-        try { pages = await fetchRandomCandidates(50); }
-        catch { finalAttempts++; continue; }
-        for (const page of pages) {
-          if (collected.length >= count) break;
-          if (!page.title || !page.extract || page.extract.length < 100) continue;
-          if (seenArticleIds.has(page.pageid) || usedThisBatch.has(page.pageid)) continue;
-          const candidates = pageToTriviaList(page, 1, {relaxed:true, minScore:3});
-          const item = candidates.find(x => !seenKeys.has(x.id));
-          if (item) acceptItem(page, item, true);
-        }
-        finalAttempts++;
-      }
-
-      discoveryRound += 1;
-      saveSeenHistory();
-      for (let i=collected.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [collected[i],collected[j]]=[collected[j],collected[i]]; }
-      return collected.slice(0,count);
+      saveSeen();
+      return out;
     }
 
     function createCard(item){
       const article=document.createElement("article"); article.className="card"; article.tabIndex=0; article.setAttribute("role","button"); article.setAttribute("aria-label",`${item.title}の解説を見る`);
-      const head=document.createElement("div"); head.className="card-head";
-      const content=document.createElement("div"); content.style.minWidth="0";
-      const title=document.createElement("h2"); title.className="word"; title.textContent=item.title;
-      const summary=document.createElement("p"); summary.className="summary"; summary.textContent=item.summary;
-      content.append(title,summary);
-      const fav=document.createElement("button"); fav.className="fav-btn"+(isFavorite(item)?" active":""); fav.type="button"; fav.title=isFavorite(item)?"お気に入りから外す":"お気に入りに保存"; fav.textContent=isFavorite(item)?"♥":"♡"; fav.addEventListener("click",e=>{e.stopPropagation();toggleFavorite(item);});
-      head.append(content,fav);
-      const meta=document.createElement("div"); meta.className="meta";
-      const source=document.createElement("span"); source.className="wiki-label"; source.textContent=`Wikipedia / ${item.articleTitle}`;
-      const more=document.createElement("span"); more.textContent="解説を読む →";
-      meta.append(source,more); article.append(head,meta);
-      article.addEventListener("click",()=>openModal(item)); article.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openModal(item);}});
-      return article;
+      const head=document.createElement("div"); head.className="card-head"; const content=document.createElement("div"); content.style.minWidth="0";
+      const title=document.createElement("h2"); title.className="word"; title.textContent=item.title; const summary=document.createElement("p"); summary.className="summary"; summary.textContent=item.summary; content.append(title,summary);
+      const fav=document.createElement("button"); fav.className="fav-btn"+(isFavorite(item)?" active":""); fav.type="button"; fav.title=isFavorite(item)?"お気に入りから外す":"お気に入りに保存"; fav.textContent=isFavorite(item)?"♥":"♡"; fav.addEventListener("click",e=>{e.stopPropagation();toggleFavorite(item);}); head.append(content,fav);
+      const meta=document.createElement("div"); meta.className="meta"; const source=document.createElement("span"); source.className="wiki-label"; source.textContent=item.sourceName; const more=document.createElement("span"); more.textContent="根拠・解説を見る →"; meta.append(source,more); article.append(head,meta);
+      article.addEventListener("click",()=>openModal(item)); article.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openModal(item);}}); return article;
     }
-
-    function render(){
-      timelineEl.innerHTML="";
-      const data=currentTab==="timeline"?items:getFavorites();
-      if(!data.length){ const empty=document.createElement("div"); empty.className="empty-note"; empty.textContent=currentTab==="favorites"?"まだお気に入りはありません。カードの♡ボタンから保存できます。":"外部から豆知識を取得しています。"; timelineEl.appendChild(empty); }
-      else data.forEach(item=>timelineEl.appendChild(createCard(item)));
-      loadMoreWrap.style.display=currentTab==="timeline"?"block":"none";
-    }
-
-    function showLoading(initial=false){
-      if(initial) timelineEl.innerHTML=`<div class="status"><div class="spinner"></div>Wikipediaから豆知識候補を探しています…</div>`;
-      loadMoreBtn.disabled=true;
-      loadMoreBtn.textContent="外部から取得中…";
-    }
-
-    async function loadMore(initial=false){
-      if(loading) return;
-      loading=true;
-      showLoading(initial && items.length===0);
-      try{
-        const batch=await getExternalTrivia(PAGE_SIZE);
-        items.push(...batch);
-        render();
-        loadMoreBtn.textContent=batch.length?"さらに20件読み込む":"別の候補を探す";
-      }catch(error){
-        console.error(error);
-        if(!items.length) timelineEl.innerHTML=`<div class="status">外部データの取得に失敗しました。<br><br>通信環境を確認して再試行してください。</div>`;
-        loadMoreBtn.textContent="再試行する";
-      }finally{
-        loading=false;
-        loadMoreBtn.disabled=false;
-      }
-    }
-
+    function render(){ timelineEl.innerHTML=""; const data=currentTab==="timeline"?items:getFavorites(); if(!data.length){const e=document.createElement("div");e.className="empty-note";e.textContent=currentTab==="favorites"?"まだお気に入りはありません。":"外部データから豆知識を取得しています。";timelineEl.appendChild(e);}else data.forEach(x=>timelineEl.appendChild(createCard(x))); loadMoreWrap.style.display=currentTab==="timeline"?"block":"none"; }
+    function showLoading(initial=false){ if(initial)timelineEl.innerHTML=`<div class="status"><div class="spinner"></div>API Ninjas Facts から1件取得中…</div>`; loadMoreBtn.disabled=true; loadMoreBtn.textContent="API Ninjasから取得中…"; }
+    async function loadMore(initial=false){ if(loading)return; loading=true; showLoading(initial&&items.length===0); try{const batch=await getExternalTrivia(PAGE_SIZE); items.push(...batch); render(); loadMoreBtn.textContent=batch.length?"さらに1件読み込む":"別の候補を探す"; if(!batch.length&&!items.length)timelineEl.innerHTML=`<div class="status">今回は候補を取得できませんでした。<br><br>「別の候補を探す」から再試行してください。</div>`;}catch(e){console.error(e);if(!items.length)timelineEl.innerHTML=`<div class="status">API Ninjasから取得できませんでした。<br><br>APIキーまたは通信環境を確認してください。</div>`;loadMoreBtn.textContent="再試行する";}finally{loading=false;loadMoreBtn.disabled=false;} }
     function openModal(item){ activeItem=item; modalTitle.textContent=item.title; modalSummary.textContent=item.summary; modalText.textContent=item.detail; detailLoading.hidden=true; wikiLink.href=item.source; wikiLink.textContent=`出典：${item.sourceName}「${item.articleTitle}」`; wikiLink.style.display="inline-flex"; updateModalFavoriteButton(); modal.classList.add("show"); modal.setAttribute("aria-hidden","false"); document.body.style.overflow="hidden"; }
     function closeModal(){modal.classList.remove("show");modal.setAttribute("aria-hidden","true");document.body.style.overflow="";activeItem=null;}
-    function updateModalFavoriteButton(){if(!activeItem)return; const fav=isFavorite(activeItem); modalFavBtn.textContent=fav?"♥ お気に入りから外す":"☆ お気に入りに保存";}
-    modalFavBtn.addEventListener("click",()=>activeItem&&toggleFavorite(activeItem));
-    closeModalBtn.addEventListener("click",closeModal); modal.addEventListener("click",e=>{if(e.target===modal)closeModal();}); document.addEventListener("keydown",e=>{if(e.key==="Escape"&&modal.classList.contains("show"))closeModal();});
-
-    tabs.forEach(tab=>tab.addEventListener("click",()=>{currentTab=tab.dataset.tab;tabs.forEach(t=>t.classList.toggle("active",t===tab));render();}));
-    loadMoreBtn.addEventListener("click",()=>loadMore(false));
-    genreForm.addEventListener("submit",e=>{e.preventDefault(); currentGenre=genreInput.value.trim(); searchOffset=0; items=[]; genreLabel.textContent=currentGenre||"すべて"; genreState.classList.toggle("show",!!currentGenre); setSearchOpen(false); loadMore(true);});
-    genreClear.addEventListener("click",()=>{currentGenre="";genreInput.value="";genreState.classList.remove("show");searchOffset=0;items=[];loadMore(true);});
-
+    function updateModalFavoriteButton(){if(!activeItem)return;modalFavBtn.textContent=isFavorite(activeItem)?"♥ お気に入りから外す":"☆ お気に入りに保存";}
+    modalFavBtn.addEventListener("click",()=>activeItem&&toggleFavorite(activeItem)); closeModalBtn.addEventListener("click",closeModal); modal.addEventListener("click",e=>{if(e.target===modal)closeModal();}); document.addEventListener("keydown",e=>{if(e.key==="Escape"&&modal.classList.contains("show"))closeModal();});
+    tabs.forEach(tab=>tab.addEventListener("click",()=>{currentTab=tab.dataset.tab;tabs.forEach(t=>t.classList.toggle("active",t===tab));render();})); loadMoreBtn.addEventListener("click",()=>loadMore(false));
+    genreForm.addEventListener("submit",e=>{e.preventDefault();currentGenre=genreInput.value.trim();items=[];genreLabel.textContent=currentGenre||"すべて";genreState.classList.toggle("show",!!currentGenre);setSearchOpen(false);loadMore(true);});
+    genreClear.addEventListener("click",()=>{currentGenre="";genreInput.value="";genreState.classList.remove("show");items=[];loadMore(true);});
     loadMore(true);
   </script>
 </body>
